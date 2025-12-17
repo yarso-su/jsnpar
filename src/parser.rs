@@ -6,6 +6,45 @@ struct BoxedParser<'a, Output> {
     parser: Box<dyn Parser<'a, Output> + 'a>,
 }
 
+fn map<'a, P, F, A, B>(parser: P, map_fn: F) -> impl Parser<'a, B>
+where
+    P: Parser<'a, A>,
+    F: Fn(A) -> B,
+{
+    move |input| {
+        parser
+            .parse(input)
+            .map(|(next_input, result)| (next_input, map_fn(result)))
+    }
+}
+
+fn pred<'a, P, A, F>(parser: P, predicate: F) -> impl Parser<'a, A>
+where
+    P: Parser<'a, A>,
+    F: Fn(&A) -> bool,
+{
+    move |input| {
+        if let Ok((next_input, value)) = parser.parse(input)
+            && predicate(&value)
+        {
+            return Ok((next_input, value));
+        }
+        Err(input)
+    }
+}
+
+fn and_then<'a, P, F, A, B, NextP>(parser: P, f: F) -> impl Parser<'a, B>
+where
+    P: Parser<'a, A>,
+    NextP: Parser<'a, B>,
+    F: Fn(A) -> NextP,
+{
+    move |input| match parser.parse(input) {
+        Ok((next_input, result)) => f(result).parse(next_input),
+        Err(input) => Err(input),
+    }
+}
+
 trait Parser<'a, Output> {
     fn parse(&self, input: &'a str) -> ParseResult<'a, Output>;
 
@@ -66,43 +105,127 @@ impl<'a, Output> Parser<'a, Output> for BoxedParser<'a, Output> {
     }
 }
 
-pub fn map<'a, P, F, A, B>(parser: P, map_fn: F) -> impl Parser<'a, B>
-where
-    P: Parser<'a, A>,
-    F: Fn(A) -> B,
-{
-    move |input| {
-        parser
-            .parse(input)
-            .map(|(next_input, result)| (next_input, map_fn(result)))
+fn match_literal<'a>(expected: &'static str) -> impl Parser<'a, ()> {
+    move |input: &'a str| {
+        input
+            .strip_prefix(expected)
+            .map(|rest| (rest, ()))
+            .ok_or(input)
     }
 }
 
-pub fn pred<'a, P, A, F>(parser: P, predicate: F) -> impl Parser<'a, A>
+fn pair<'a, P1, P2, R1, R2>(parser1: P1, parser2: P2) -> impl Parser<'a, (R1, R2)>
 where
-    P: Parser<'a, A>,
-    F: Fn(&A) -> bool,
+    P1: Parser<'a, R1>,
+    P2: Parser<'a, R2>,
 {
     move |input| {
-        if let Ok((next_input, value)) = parser.parse(input)
-            && predicate(&value)
-        {
-            return Ok((next_input, value));
+        parser1.parse(input).and_then(|(next_input, result1)| {
+            parser2
+                .parse(next_input)
+                .map(|(last_input, result2)| (last_input, (result1, result2)))
+        })
+    }
+}
+
+fn left<'a, P1, P2, R1, R2>(parser1: P1, parser2: P2) -> impl Parser<'a, R1>
+where
+    P1: Parser<'a, R1>,
+    P2: Parser<'a, R2>,
+{
+    map(pair(parser1, parser2), |(left, _right)| left)
+}
+
+fn right<'a, P1, P2, R1, R2>(parser1: P1, parser2: P2) -> impl Parser<'a, R2>
+where
+    P1: Parser<'a, R1>,
+    P2: Parser<'a, R2>,
+{
+    map(pair(parser1, parser2), |(_left, right)| right)
+}
+
+fn either<'a, P1, P2, A>(parser1: P1, parser2: P2) -> impl Parser<'a, A>
+where
+    P1: Parser<'a, A>,
+    P2: Parser<'a, A>,
+{
+    move |input| parser1.parse(input).or_else(|_| parser2.parse(input))
+}
+
+fn one_or_more<'a, P, A>(parser: P) -> impl Parser<'a, Vec<A>>
+where
+    P: Parser<'a, A>,
+{
+    move |mut input| {
+        let mut results = Vec::new();
+
+        if let Ok((next_input, result)) = parser.parse(input) {
+            input = next_input;
+            results.push(result);
+        } else {
+            return Err(input);
         }
-        Err(input)
+
+        while let Ok((next_input, next_item)) = parser.parse(input) {
+            input = next_input;
+            results.push(next_item);
+        }
+
+        Ok((input, results))
     }
 }
 
-pub fn and_then<'a, P, F, A, B, NextP>(parser: P, f: F) -> impl Parser<'a, B>
+fn zero_or_more<'a, P, A>(parser: P) -> impl Parser<'a, Vec<A>>
 where
     P: Parser<'a, A>,
-    NextP: Parser<'a, B>,
-    F: Fn(A) -> NextP,
 {
-    move |input| match parser.parse(input) {
-        Ok((next_input, result)) => f(result).parse(next_input),
-        Err(input) => Err(input),
+    move |mut input| {
+        let mut results = Vec::new();
+
+        while let Ok((next_input, next_item)) = parser.parse(input) {
+            input = next_input;
+            results.push(next_item);
+        }
+
+        Ok((input, results))
     }
+}
+
+fn any_char<'a>(input: &'a str) -> ParseResult<'a, char> {
+    match input.chars().next() {
+        Some(next) => Ok((&input[next.len_utf8()..], next)),
+        _ => Err(input),
+    }
+}
+
+fn whitespace_char<'a>() -> impl Parser<'a, char> {
+    any_char.pred(|c| c.is_whitespace())
+}
+
+fn space1<'a>() -> impl Parser<'a, Vec<char>> {
+    one_or_more(whitespace_char())
+}
+
+fn space0<'a>() -> impl Parser<'a, Vec<char>> {
+    zero_or_more(whitespace_char())
+}
+
+fn whitespace_wrap<'a, P, A>(parser: P) -> impl Parser<'a, A>
+where
+    P: Parser<'a, A>,
+{
+    right(space0(), left(parser, space0()))
+}
+
+fn quoted_string<'a>() -> impl Parser<'a, String> {
+    right(
+        match_literal("\""),
+        left(
+            zero_or_more(any_char.pred(|c| *c != '"')),
+            match_literal("\""),
+        ),
+    )
+    .map(|chars| chars.into_iter().collect())
 }
 
 #[cfg(test)]
@@ -110,8 +233,112 @@ mod tests {
     use super::*;
 
     #[test]
-    fn json_parser() {
-        let json_value = JsonValue::Null;
-        assert_eq!(json_value, JsonValue::Null);
+    fn literal_parser() {
+        let hello = match_literal("hello");
+
+        assert_eq!(hello.parse("hello"), Ok(("", ())));
+        assert_eq!(hello.parse("hello world"), Ok((" world", ())));
+        assert_eq!(hello.parse("world"), Err("world"));
+    }
+
+    #[test]
+    fn pair_combinator() {
+        let opener = pair(match_literal("{"), match_literal(r#""hello""#));
+
+        assert_eq!(
+            opener.parse(r#"{"hello":"world"}"#),
+            Ok((r#":"world"}"#, ((), ()))),
+        );
+        assert_eq!(opener.parse("oops"), Err("oops"));
+        assert_eq!(opener.parse("{oops"), Err("oops"));
+    }
+
+    #[test]
+    fn right_combinator() {
+        let opener = right(match_literal("{"), quoted_string());
+
+        assert_eq!(
+            opener.parse(r#"{"hello":"world"}"#),
+            Ok((r#":"world"}"#, String::from("hello")))
+        );
+        assert_eq!(opener.parse("oops"), Err("oops"));
+        assert_eq!(opener.parse("{oops"), Err("oops"));
+    }
+
+    #[test]
+    fn left_combinator() {
+        let opener = left(
+            right(match_literal("{"), quoted_string()),
+            match_literal(":"),
+        );
+
+        assert_eq!(
+            opener.parse(r#"{"hello":"world"}"#),
+            Ok((r#""world"}"#, String::from("hello")))
+        );
+        assert_eq!(opener.parse("oops"), Err("oops"));
+        assert_eq!(opener.parse("{oops"), Err("oops"));
+    }
+
+    #[test]
+    fn either_combinator() {
+        let or_parser = either(match_literal("true"), match_literal("false"));
+
+        assert_eq!(or_parser.parse("true"), Ok(("", ())));
+        assert_eq!(or_parser.parse("false"), Ok(("", ())));
+        assert_eq!(or_parser.parse("null"), Err("null"));
+    }
+
+    #[test]
+    fn one_or_more_combinator() {
+        let array_parser = right(
+            match_literal("["),
+            either(
+                left(quoted_string(), match_literal("]")).map(|item| vec![item]),
+                left(
+                    pair(
+                        one_or_more(left(quoted_string(), match_literal(","))),
+                        quoted_string(),
+                    )
+                    .map(move |(mut items, last_item)| {
+                        items.push(last_item);
+                        items
+                    }),
+                    match_literal("]"),
+                ),
+            ),
+        );
+
+        assert_eq!(
+            array_parser.parse(r#"["hello","world"]"#),
+            Ok(("", vec![String::from("hello"), String::from("world")])),
+        );
+        assert_eq!(
+            array_parser.parse(r#"["hello","world"]"#),
+            Ok(("", vec![String::from("hello"), String::from("world")])),
+        );
+        assert_eq!(
+            array_parser.parse(r#"["world"]"#),
+            Ok(("", vec![String::from("world")])),
+        );
+        assert_eq!(array_parser.parse("[]"), Err("]"));
+    }
+
+    #[test]
+    fn zero_or_more_combinator() {
+        let array_parser = right(zero_or_more(match_literal(" ")), quoted_string());
+
+        assert_eq!(
+            array_parser.parse(r#"          "hello""#),
+            Ok(("", String::from("hello"))),
+        );
+        assert_eq!(
+            array_parser.parse(r#"          "hello"world"#),
+            Ok(("world", String::from("hello"))),
+        );
+        assert_eq!(
+            array_parser.parse(r#""hello""#),
+            Ok(("", String::from("hello"))),
+        );
     }
 }
