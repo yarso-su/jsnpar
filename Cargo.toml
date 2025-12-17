@@ -1,0 +1,13 @@
+[package]
+name = "jsnpar"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = ""
+readme = "README.md"
+repository = "https://github.com/yarso-su/jsnpar"
+keywords = ["json", "crate", "parser"]
+categories = ["parser-implementations", "encoding"]
+
+[dependencies]
+thiserror = "2.0.17"
