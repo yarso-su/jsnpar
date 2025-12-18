@@ -1,8 +1,19 @@
+//! # JSON Parser implementation using parser combinators
+//!
+//! This is an educational project not intended to be used in a production environment. Although I
+//! plan to improve the behaviour and implementation. Feel free to use it to make your own
+//! implementation, or take whatever you can leverage.
+//!
+//! I created this crate thanks to Bodil's article on [parser combinators](https://bodil.lol/parser-combinators/).
+
 use super::JsonValue;
+use std::collections::HashMap;
 
-type ParseResult<'a, Output> = Result<(&'a str, Output), &'a str>;
+/// Utility type for parsing results. It is a `Result` with the remaining input and the parsed value.
+pub type ParseResult<'a, Output> = Result<(&'a str, Output), &'a str>;
 
-struct BoxedParser<'a, Output> {
+/// Struct to allow Rust to calculate type sizes at runtime to avoid stack overflows.
+pub struct BoxedParser<'a, Output> {
     parser: Box<dyn Parser<'a, Output> + 'a>,
 }
 
@@ -33,19 +44,8 @@ where
     }
 }
 
-fn and_then<'a, P, F, A, B, NextP>(parser: P, f: F) -> impl Parser<'a, B>
-where
-    P: Parser<'a, A>,
-    NextP: Parser<'a, B>,
-    F: Fn(A) -> NextP,
-{
-    move |input| match parser.parse(input) {
-        Ok((next_input, result)) => f(result).parse(next_input),
-        Err(input) => Err(input),
-    }
-}
-
-trait Parser<'a, Output> {
+/// Trait for parsers. Comes with a few useful methods to make it easier to connect parsers.
+pub trait Parser<'a, Output> {
     fn parse(&self, input: &'a str) -> ParseResult<'a, Output>;
 
     fn map<F, NewOutput>(self, map_fn: F) -> BoxedParser<'a, NewOutput>
@@ -65,17 +65,6 @@ trait Parser<'a, Output> {
         F: Fn(&Output) -> bool + 'a,
     {
         BoxedParser::new(pred(self, pred_fn))
-    }
-
-    fn and_then<F, NextParser, NewOutput>(self, f: F) -> BoxedParser<'a, NewOutput>
-    where
-        Self: Sized + 'a,
-        Output: 'a,
-        NewOutput: 'a,
-        NextParser: Parser<'a, NewOutput> + 'a,
-        F: Fn(Output) -> NextParser + 'a,
-    {
-        BoxedParser::new(and_then(self, f))
     }
 }
 
@@ -152,7 +141,33 @@ where
     move |input| parser1.parse(input).or_else(|_| parser2.parse(input))
 }
 
-fn one_or_more<'a, P, A>(parser: P) -> impl Parser<'a, Vec<A>>
+fn optional<'a, P, A>(parser: P) -> impl Parser<'a, Option<A>>
+where
+    P: Parser<'a, A>,
+{
+    move |input| match parser.parse(input) {
+        Ok((remaining, value)) => Ok((remaining, Some(value))),
+        Err(_) => Ok((input, None)),
+    }
+}
+
+fn zero_or_more<'a, P, A>(parser: P) -> impl Parser<'a, Vec<A>>
+where
+    P: Parser<'a, A>,
+{
+    move |mut input| {
+        let mut results = Vec::new();
+
+        while let Ok((next_input, next_item)) = parser.parse(input) {
+            input = next_input;
+            results.push(next_item);
+        }
+
+        Ok((input, results))
+    }
+}
+
+pub fn one_or_more<'a, P, A>(parser: P) -> impl Parser<'a, Vec<A>>
 where
     P: Parser<'a, A>,
 {
@@ -175,22 +190,6 @@ where
     }
 }
 
-fn zero_or_more<'a, P, A>(parser: P) -> impl Parser<'a, Vec<A>>
-where
-    P: Parser<'a, A>,
-{
-    move |mut input| {
-        let mut results = Vec::new();
-
-        while let Ok((next_input, next_item)) = parser.parse(input) {
-            input = next_input;
-            results.push(next_item);
-        }
-
-        Ok((input, results))
-    }
-}
-
 fn any_char<'a>(input: &'a str) -> ParseResult<'a, char> {
     match input.chars().next() {
         Some(next) => Ok((&input[next.len_utf8()..], next)),
@@ -200,10 +199,6 @@ fn any_char<'a>(input: &'a str) -> ParseResult<'a, char> {
 
 fn whitespace_char<'a>() -> impl Parser<'a, char> {
     any_char.pred(|c| c.is_whitespace())
-}
-
-fn space1<'a>() -> impl Parser<'a, Vec<char>> {
-    one_or_more(whitespace_char())
 }
 
 fn space0<'a>() -> impl Parser<'a, Vec<char>> {
@@ -226,6 +221,160 @@ fn quoted_string<'a>() -> impl Parser<'a, String> {
         ),
     )
     .map(|chars| chars.into_iter().collect())
+}
+
+fn boolean_value<'a>() -> impl Parser<'a, JsonValue> {
+    either(
+        match_literal("true").map(|_| JsonValue::Bool(true)),
+        match_literal("false").map(|_| JsonValue::Bool(false)),
+    )
+}
+
+fn string_value<'a>() -> impl Parser<'a, JsonValue> {
+    quoted_string().map(JsonValue::String)
+}
+
+fn number_value<'a>() -> impl Parser<'a, JsonValue> {
+    map(
+        pair(
+            optional(match_literal("-")),
+            pair(
+                one_or_more(any_char.pred(|c| c.is_numeric())),
+                optional(right(
+                    match_literal("."),
+                    one_or_more(any_char.pred(|c| c.is_numeric())),
+                )),
+            ),
+        ),
+        |(sign, (int_part, decimal_part))| {
+            let mut num_str = String::new();
+
+            if sign.is_some() {
+                num_str.push('-');
+            }
+
+            num_str.push_str(&int_part.iter().collect::<String>());
+
+            if let Some(dec) = decimal_part {
+                num_str.push('.');
+                num_str.push_str(&dec.iter().collect::<String>());
+            }
+
+            JsonValue::Number(num_str.parse::<f64>().unwrap())
+        },
+    )
+}
+
+fn null_value<'a>() -> BoxedParser<'a, JsonValue> {
+    BoxedParser::new(match_literal("null").map(|_| JsonValue::Null))
+}
+
+fn last_array_value<'a>() -> BoxedParser<'a, Option<JsonValue>> {
+    BoxedParser::new(either(
+        match_literal("]").map(|_| None),
+        left(
+            whitespace_wrap(json_value()),
+            whitespace_wrap(match_literal("]")),
+        )
+        .map(Some),
+    ))
+}
+
+fn last_object_value<'a>() -> BoxedParser<'a, Option<(String, JsonValue)>> {
+    BoxedParser::new(either(
+        match_literal("}").map(|_| None),
+        pair(
+            whitespace_wrap(quoted_string()),
+            right(
+                whitespace_wrap(match_literal(":")),
+                left(
+                    whitespace_wrap(json_value()),
+                    whitespace_wrap(match_literal("}")),
+                ),
+            ),
+        )
+        .map(|(key, value)| Some((key, value))),
+    ))
+}
+
+pub fn array_value<'a>() -> BoxedParser<'a, JsonValue> {
+    BoxedParser::new(move |input| {
+        whitespace_wrap(right(
+            match_literal("["),
+            pair(
+                zero_or_more(left(
+                    whitespace_wrap(json_value()),
+                    whitespace_wrap(match_literal(",")),
+                ))
+                .map(JsonValue::Array),
+                last_array_value(),
+            )
+            .map(|(arr, last)| {
+                if let JsonValue::Array(mut arr) = arr {
+                    if let Some(last) = last {
+                        arr.push(last);
+                    }
+                    JsonValue::Array(arr)
+                } else {
+                    arr
+                }
+            }),
+        ))
+        .parse(input)
+    })
+}
+
+fn json_value<'a>() -> BoxedParser<'a, JsonValue> {
+    BoxedParser::new(move |input| {
+        either(
+            either(
+                either(null_value(), boolean_value()),
+                either(string_value(), number_value()),
+            ),
+            either(object_value(), array_value()),
+        )
+        .parse(input)
+    })
+}
+
+/// Parses a JSON object. Use this as the entry point for parsing JSON.
+pub fn object_value<'a>() -> BoxedParser<'a, JsonValue> {
+    BoxedParser::new(move |input| {
+        whitespace_wrap(right(
+            match_literal("{"),
+            pair(
+                zero_or_more(pair(
+                    whitespace_wrap(quoted_string()),
+                    right(
+                        whitespace_wrap(match_literal(":")),
+                        left(
+                            whitespace_wrap(json_value()),
+                            whitespace_wrap(match_literal(",")),
+                        ),
+                    ),
+                ))
+                .map(|pairs| {
+                    let mut hash = HashMap::new();
+                    for (key, value) in pairs {
+                        hash.insert(key, value);
+                    }
+                    JsonValue::Object(hash)
+                }),
+                last_object_value(),
+            )
+            .map(|(object, last)| {
+                if let JsonValue::Object(mut hash) = object {
+                    if let Some((key, value)) = last {
+                        hash.insert(key, value);
+                    }
+                    JsonValue::Object(hash)
+                } else {
+                    object
+                }
+            }),
+        ))
+        .parse(input)
+    })
 }
 
 #[cfg(test)]
@@ -290,41 +439,6 @@ mod tests {
     }
 
     #[test]
-    fn one_or_more_combinator() {
-        let array_parser = right(
-            match_literal("["),
-            either(
-                left(quoted_string(), match_literal("]")).map(|item| vec![item]),
-                left(
-                    pair(
-                        one_or_more(left(quoted_string(), match_literal(","))),
-                        quoted_string(),
-                    )
-                    .map(move |(mut items, last_item)| {
-                        items.push(last_item);
-                        items
-                    }),
-                    match_literal("]"),
-                ),
-            ),
-        );
-
-        assert_eq!(
-            array_parser.parse(r#"["hello","world"]"#),
-            Ok(("", vec![String::from("hello"), String::from("world")])),
-        );
-        assert_eq!(
-            array_parser.parse(r#"["hello","world"]"#),
-            Ok(("", vec![String::from("hello"), String::from("world")])),
-        );
-        assert_eq!(
-            array_parser.parse(r#"["world"]"#),
-            Ok(("", vec![String::from("world")])),
-        );
-        assert_eq!(array_parser.parse("[]"), Err("]"));
-    }
-
-    #[test]
     fn zero_or_more_combinator() {
         let array_parser = right(zero_or_more(match_literal(" ")), quoted_string());
 
@@ -339,6 +453,41 @@ mod tests {
         assert_eq!(
             array_parser.parse(r#""hello""#),
             Ok(("", String::from("hello"))),
+        );
+    }
+
+    #[test]
+    fn parser() {
+        assert_eq!(
+            object_value().parse("{}"),
+            Ok(("", JsonValue::Object(HashMap::new())))
+        );
+        assert_eq!(
+            object_value().parse(
+                r#"{"name":"joe","active":true, "nested": {"foo":"bar"}, "packages_weights": [1,-3.1416]}"#
+            ),
+            Ok((
+                "",
+                JsonValue::Object(HashMap::from([
+                    ("name".to_string(), JsonValue::String("joe".to_string())),
+                    ("active".to_string(), JsonValue::Bool(true)),
+                    (
+                        "nested".to_string(),
+                        JsonValue::Object(HashMap::from([(
+                            "foo".to_string(),
+                            JsonValue::String("bar".to_string())
+                        )]))
+                    ),
+                    (
+                        "packages_weights".to_string(),
+                        JsonValue::Array(vec![
+                            JsonValue::Number(1.0),
+                            #[allow(clippy::approx_constant)]
+                            JsonValue::Number(-3.1416),
+                        ])
+                    )
+                ]))
+            ))
         );
     }
 }

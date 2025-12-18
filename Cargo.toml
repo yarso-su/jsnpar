@@ -3,11 +3,9 @@ name = "jsnpar"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = ""
+description = "Rust JSON parser implementation using parser combinators."
 readme = "README.md"
+authors = ["yarso-su (https://github.com/yarso-su)"]
 repository = "https://github.com/yarso-su/jsnpar"
 keywords = ["json", "crate", "parser"]
-categories = ["parser-implementations", "encoding"]
-
-[dependencies]
-thiserror = "2.0.17"
+categories = ["parser-implementations"]
