@@ -265,8 +265,8 @@ fn number_value<'a>() -> impl Parser<'a, JsonValue> {
     )
 }
 
-fn null_value<'a>() -> BoxedParser<'a, JsonValue> {
-    BoxedParser::new(match_literal("null").map(|_| JsonValue::Null))
+fn null_value<'a>() -> impl Parser<'a, JsonValue> {
+    match_literal("null").map(|_| JsonValue::Null)
 }
 
 fn last_array_value<'a>() -> BoxedParser<'a, Option<JsonValue>> {
@@ -324,21 +324,7 @@ pub fn array_value<'a>() -> BoxedParser<'a, JsonValue> {
     })
 }
 
-fn json_value<'a>() -> BoxedParser<'a, JsonValue> {
-    BoxedParser::new(move |input| {
-        either(
-            either(
-                either(null_value(), boolean_value()),
-                either(string_value(), number_value()),
-            ),
-            either(object_value(), array_value()),
-        )
-        .parse(input)
-    })
-}
-
-/// Parses a JSON object. Use this as the entry point for parsing JSON.
-pub fn object_value<'a>() -> BoxedParser<'a, JsonValue> {
+fn object_value<'a>() -> BoxedParser<'a, JsonValue> {
     BoxedParser::new(move |input| {
         whitespace_wrap(right(
             match_literal("{"),
@@ -373,6 +359,20 @@ pub fn object_value<'a>() -> BoxedParser<'a, JsonValue> {
                 }
             }),
         ))
+        .parse(input)
+    })
+}
+
+/// Parses a JSON value. Use this as the entry point for parsing JSON.
+pub fn json_value<'a>() -> BoxedParser<'a, JsonValue> {
+    BoxedParser::new(move |input| {
+        either(
+            either(
+                either(null_value(), boolean_value()),
+                either(string_value(), number_value()),
+            ),
+            either(object_value(), array_value()),
+        )
         .parse(input)
     })
 }
@@ -457,7 +457,7 @@ mod tests {
     }
 
     #[test]
-    fn parser() {
+    fn object_parser() {
         assert_eq!(
             object_value().parse("{}"),
             Ok(("", JsonValue::Object(HashMap::new())))
@@ -487,6 +487,40 @@ mod tests {
                         ])
                     )
                 ]))
+            ))
+        );
+    }
+
+    #[test]
+    fn json() {
+        assert_eq!(
+            json_value().parse(
+                r#"[false,{"name":"joe","active":true, "nested": {"foo":"bar"}, "packages_weights": [1,-3.1416]}]"#
+            ),
+            Ok((
+                "",
+                JsonValue::Array(vec![
+                    JsonValue::Bool(false),
+                JsonValue::Object(HashMap::from([
+                    ("name".to_string(), JsonValue::String("joe".to_string())),
+                    ("active".to_string(), JsonValue::Bool(true)),
+                    (
+                        "nested".to_string(),
+                        JsonValue::Object(HashMap::from([(
+                            "foo".to_string(),
+                            JsonValue::String("bar".to_string())
+                        )]))
+                    ),
+                    (
+                        "packages_weights".to_string(),
+                        JsonValue::Array(vec![
+                            JsonValue::Number(1.0),
+                            #[allow(clippy::approx_constant)]
+                            JsonValue::Number(-3.1416),
+                        ])
+                    )
+                ]))
+                ])
             ))
         );
     }

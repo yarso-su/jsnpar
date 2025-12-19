@@ -23,7 +23,7 @@ pub use value::JsonValue;
 
 /// Parse a JSON string into a `JsonValue` type.
 pub fn parse(input: &str) -> Result<JsonValue, String> {
-    match parser::object_value().parse(input) {
+    match parser::json_value().parse(input) {
         Ok((_, value)) => Ok(value),
         Err(err) => Err(err.to_string()),
     }
