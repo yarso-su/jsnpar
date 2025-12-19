@@ -26,8 +26,6 @@ cargo add jsnpar
 ## Usage
 
 ```rust
-use jsnpar;
-
 let json = r#"{"name": "yarso", "awesome": true}"#;
 let result = jsnpar::parse(json);
 
